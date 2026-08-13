@@ -351,7 +351,7 @@ const LS = {
 };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 const now = () => Date.now();
-const TWO_DAYS = 1000*60*60*24*2;
+const TWO_HOURS = 1000*60*60*2;
 
 /* نسخة محلية (كاش) من بيانات فايربيز، تتحدث تلقائيًا لحظة أي تغيير عن طريق on('value') */
 let cache = { branches: [], main: {}, shortage: {}, reports: {}, instashopReports: {}, settings: {}, catalogs: {}, appAvailable: {}, unavailableReports: {} };
@@ -374,6 +374,45 @@ function normalizeCache(v){
 
 let firstDataReceived = false;
 let firstLoadTimeoutTimer = null;
+
+/* ===== تثبيت الريبورت الجديد فورًا =====
+   الريبورت الذي تم إنشاؤه محليًا له أولوية على أي Snapshot أقدم
+   يصل من Firebase. وإذا وصل Snapshot أقدم، نعيد تثبيت النسخة الأحدث
+   في Firebase بدل السماح لها بالرجوع للقديم. */
+function mergeReportResults(incoming){
+  const next = normalizeCache(incoming);
+  const reportTypes = [
+    ['reports', 'app_data/reports/'],
+    ['instashopReports', 'app_data/instashopReports/']
+  ];
+
+  reportTypes.forEach(([type, path])=>{
+    const current = cache[type] || {};
+    const remote = next[type] || {};
+    const merged = {...remote};
+
+    Object.keys(current).forEach(id=>{
+      const localReport = current[id];
+      const remoteReport = remote[id];
+      const localTs = Number(localReport && localReport.generatedAt) || 0;
+      const remoteTs = Number(remoteReport && remoteReport.generatedAt) || 0;
+
+      if(localTs > remoteTs){
+        /* لا تسمح للقديم بإرجاع الشاشة */
+        merged[id] = localReport;
+
+        /* والأهم: ثبّت الجديد مرة أخرى في Firebase */
+        firebase.database().ref(path + id).set(localReport).catch(err=>{
+          console.error('Re-save latest report failed:', path + id, err);
+        });
+      }
+    });
+
+    next[type] = merged;
+  });
+
+  return next;
+}
 
 function attachDataListener(){
   if(dataListenerAttached) return;
@@ -399,7 +438,7 @@ function attachDataListener(){
   firebase.database().ref('app_data').on('value', snapshot=>{
     firstDataReceived = true;
     clearTimeout(firstLoadTimeoutTimer);
-    cache = normalizeCache(snapshot.val());
+    cache = mergeReportResults(snapshot.val());
     if(!cache.settings || !cache.settings.deleteBranchPassword){
       // أول مرة: نزرع كلمة السر الافتراضية فى فايربيز عشان تتخزن هناك بدل ما تكون مكتوبة فى كود الصفحة
       firebaseWrite('app_data/settings/deleteBranchPassword', DELETE_BRANCH_PASSWORD_DEFAULT);
@@ -522,11 +561,11 @@ function fmtDate(ts){ if(!ts) return '—'; const d = new Date(ts); return d.toL
 function expireOldReports(){
   getBranches().forEach(b=>{
     const r = getReports(b.id);
-    if(r && r.generatedAt && (now() - r.generatedAt > TWO_DAYS)){
+    if(r && r.generatedAt && (now() - r.generatedAt > TWO_HOURS)){
       clearReports(b.id);
     }
     const ir = getInstashopReport(b.id);
-    if(ir && ir.generatedAt && (now() - ir.generatedAt > TWO_DAYS)){
+    if(ir && ir.generatedAt && (now() - ir.generatedAt > TWO_HOURS)){
       clearInstashopReport(b.id);
     }
   });
@@ -1320,29 +1359,52 @@ function generateInstashopReportCore(branchId, updates){
   return {removed, milkKept, count: processed.length};
 }
 
-function generateReports(branchId){
+async function generateReports(branchId){
   const updates = {};
   const res = generateReportsCore(branchId, updates);
   if(!res){ toast('ارفع الليستة اليومية أولاً'); return; }
-  generateInstashopReportCore(branchId, updates);
-  firebaseBatchWrite(updates);
+
+  /* الجديد أصبح في cache فورًا مثل الليستة اليومية */
   renderBranches(branchId);
-  toast('تم إنشاء الريبورتات — تم حذف '+res.removed+' صنف من ليستة النواقص بالكامل');
+
+  try{
+    await firebaseBatchWrite(updates);
+    renderBranches(branchId);
+    toast('تم إنشاء الريبورتات وتثبيت النتيجة الجديدة فورًا');
+  }catch(err){
+    console.error('Report save error:', err);
+    renderBranches(branchId);
+    toast('تم إنشاء النتيجة، لكن تعذر تأكيد الحفظ في Firebase');
+  }
 }
 
 /* إنشاء/تحديث الريبورتات لكل الفروع دفعة واحدة */
-function generateAllReports(){
+async function generateAllReports(){
   const branches = getBranches();
   const updates = {};
   let done = 0, skipped = 0;
+
   branches.forEach(b=>{
     const res = generateReportsCore(b.id, updates);
-    if(res){ done++; generateInstashopReportCore(b.id, updates); }
-    else skipped++;
+    if(res){
+      done++;
+      generateInstashopReportCore(b.id, updates);
+    }else skipped++;
   });
-  firebaseBatchWrite(updates);
+
+  /* الجديد ظاهر فورًا، ثم يتم تثبيته دفعة واحدة */
   renderBranches();
-  toast(`تم إنشاء/تحديث الريبورتات لـ ${done} فرع` + (skipped ? ' — تم تخطي '+skipped+' فرع بدون ليستة يومية' : ''));
+
+  try{
+    await firebaseBatchWrite(updates);
+    renderBranches();
+    toast(`تم إنشاء وتثبيت الريبورتات الجديدة لـ ${done} فرع` +
+      (skipped ? ' — تم تخطي '+skipped+' فرع بدون ليستة يومية' : ''));
+  }catch(err){
+    console.error('Reports batch save error:', err);
+    renderBranches();
+    toast('تم إنشاء النتائج، لكن تعذر تأكيد الحفظ في Firebase');
+  }
 }
 
 /* ===================== EXPORT XLSX ===================== */
