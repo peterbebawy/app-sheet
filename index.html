@@ -1368,7 +1368,10 @@ async function generateReports(branchId){
   renderBranches(branchId);
 
   try{
-    await firebaseBatchWrite(updates);
+    const saveResult = firebaseBatchWrite(updates);
+    if(saveResult && typeof saveResult.then === 'function'){
+      await saveResult;
+    }
     renderBranches(branchId);
     toast('تم إنشاء الريبورتات وتثبيت النتيجة الجديدة فورًا');
   }catch(err){
@@ -1396,7 +1399,10 @@ async function generateAllReports(){
   renderBranches();
 
   try{
-    await firebaseBatchWrite(updates);
+    const saveResult = firebaseBatchWrite(updates);
+    if(saveResult && typeof saveResult.then === 'function'){
+      await saveResult;
+    }
     renderBranches();
     toast(`تم إنشاء وتثبيت الريبورتات الجديدة لـ ${done} فرع` +
       (skipped ? ' — تم تخطي '+skipped+' فرع بدون ليستة يومية' : ''));
