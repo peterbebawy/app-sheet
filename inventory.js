@@ -34,31 +34,73 @@ function normalizeCache(v){
 let firstDataReceived = false;
 let firstLoadTimeoutTimer = null;
 
-/* يمنع Snapshot قديم من Firebase من استبدال الريبورت الجديد لحظيًا.
-   بعد إنشاء ريبورت جديد، نحتفظ بالنسخة الجديدة محليًا حتى يصل Snapshot
-   بنفس generatedAt أو أحدث. */
-const pendingReportWrites = {
+/* ===== تثبيت الريبورت فور إنشائه =====
+   نفس فكرة تثبيت الليستة اليومية:
+   الواجهة تعتمد فورًا على آخر ريبورت أنشأه المستخدم، وأي Snapshot قديم
+   يصل من Firebase لا يُسمح له باستبداله. يظل القفل حتى يصل من Firebase
+   نفس الريبورت أو ريبورت أحدث. */
+const REPORT_LOCAL_KEY = 'ibs_latest_reports_v1';
+const reportPending = {
   reports: {},
   instashopReports: {}
 };
 
-function keepNewestReportsFromSnapshot(nextCache){
-  ['reports','instashopReports'].forEach(type=>{
-    const pending = pendingReportWrites[type] || {};
-    Object.keys(pending).forEach(id=>{
-      const local = pending[id];
-      const incoming = nextCache[type] && nextCache[type][id];
-      const localTime = Number(local && local.generatedAt) || 0;
-      const incomingTime = Number(incoming && incoming.generatedAt) || 0;
+function loadReportPending(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(REPORT_LOCAL_KEY) || '{}');
+    reportPending.reports = saved.reports || {};
+    reportPending.instashopReports = saved.instashopReports || {};
+  }catch(e){
+    reportPending.reports = {};
+    reportPending.instashopReports = {};
+  }
+}
 
-      if(!incoming || incomingTime < localTime){
-        nextCache[type][id] = local;
-      }else{
+function saveReportPending(){
+  try{
+    localStorage.setItem(REPORT_LOCAL_KEY, JSON.stringify(reportPending));
+  }catch(e){}
+}
+
+loadReportPending();
+
+function mergeNewestReportsFromFirebase(next){
+  ['reports','instashopReports'].forEach(type=>{
+    const pending = reportPending[type] || {};
+    Object.keys(pending).forEach(id=>{
+      const localReport = pending[id];
+      const remoteReport = next[type] && next[type][id];
+      const localTs = Number(localReport && localReport.generatedAt) || 0;
+      const remoteTs = Number(remoteReport && remoteReport.generatedAt) || 0;
+
+      if(remoteTs >= localTs && remoteTs > 0){
+        /* Firebase أصبح متزامنًا: نرفع القفل */
         delete pending[id];
+      }else{
+        /* Snapshot أقدم أو غير موجود: حافظ على الريبورت الجديد فورًا */
+        next[type] = next[type] || {};
+        next[type][id] = localReport;
       }
     });
   });
-  return nextCache;
+  saveReportPending();
+  return next;
+}
+
+function lockReport(type, id, data){
+  reportPending[type][id] = data;
+  saveReportPending();
+}
+
+function unlockReportIfConfirmed(type, id, remote){
+  const local = reportPending[type] && reportPending[type][id];
+  if(!local) return;
+  const localTs = Number(local.generatedAt) || 0;
+  const remoteTs = Number(remote && remote.generatedAt) || 0;
+  if(remoteTs >= localTs && remoteTs > 0){
+    delete reportPending[type][id];
+    saveReportPending();
+  }
 }
 
 function attachDataListener(){
@@ -86,7 +128,7 @@ function attachDataListener(){
     firstDataReceived = true;
     clearTimeout(firstLoadTimeoutTimer);
     cache = normalizeCache(snapshot.val());
-    cache = keepNewestReportsFromSnapshot(cache);
+    cache = mergeNewestReportsFromFirebase(cache);
     if(!cache.settings || !cache.settings.deleteBranchPassword){
       // أول مرة: نزرع كلمة السر الافتراضية فى فايربيز عشان تتخزن هناك بدل ما تكون مكتوبة فى كود الصفحة
       firebaseWrite('app_data/settings/deleteBranchPassword', DELETE_BRANCH_PASSWORD_DEFAULT);
@@ -187,13 +229,31 @@ function clearAllMain(){
 function getShortage(id){ return (cache.shortage && cache.shortage[id]) || {updatedAt:null, items:[]}; }
 function saveShortage(id, d){ cache.shortage[id] = d; firebaseWrite('app_data/shortage/'+id, d); }
 function getReports(id){ return (cache.reports && cache.reports[id]) || null; }
-function saveReports(id, d){ cache.reports[id] = d; firebaseWrite('app_data/reports/'+id, d); }
-function clearReports(id){ delete cache.reports[id]; firebaseRemove('app_data/reports/'+id); }
+function saveReports(id, d){
+  cache.reports[id] = d;
+  lockReport('reports', id, d);
+  firebaseWrite('app_data/reports/'+id, d);
+}
+function clearReports(id){
+  delete cache.reports[id];
+  if(reportPending.reports[id]) delete reportPending.reports[id];
+  saveReportPending();
+  firebaseRemove('app_data/reports/'+id);
+}
 
 /* ريبورت Instashop منفصل (نفس تفاصيل Vezeeta، لكن مع استثناء أصناف الألبان من الحذف بسبب النواقص) */
 function getInstashopReport(id){ return (cache.instashopReports && cache.instashopReports[id]) || null; }
-function saveInstashopReport(id, d){ cache.instashopReports[id] = d; firebaseWrite('app_data/instashopReports/'+id, d); }
-function clearInstashopReport(id){ delete cache.instashopReports[id]; firebaseRemove('app_data/instashopReports/'+id); }
+function saveInstashopReport(id, d){
+  cache.instashopReports[id] = d;
+  lockReport('instashopReports', id, d);
+  firebaseWrite('app_data/instashopReports/'+id, d);
+}
+function clearInstashopReport(id){
+  delete cache.instashopReports[id];
+  if(reportPending.instashopReports[id]) delete reportPending.instashopReports[id];
+  saveReportPending();
+  firebaseRemove('app_data/instashopReports/'+id);
+}
 
 function norm(v){ return (v===undefined||v===null) ? '' : String(v).trim(); }
 function toNum(v){ const n = parseFloat(v); return isNaN(n) ? 0 : n; }
@@ -887,7 +947,7 @@ function generateReportsCore(branchId, updates){
 
   const data = {generatedAt: now(), items: processed, matchedCount: removed};
   cache.reports[branchId] = data;
-  pendingReportWrites.reports[branchId] = data;
+  lockReport('reports', branchId, data);
   if(updates){ updates['app_data/reports/'+branchId] = data; }
   else { firebaseWrite('app_data/reports/'+branchId, data); }
   return {removed, count: processed.length};
@@ -927,7 +987,7 @@ function generateInstashopReportCore(branchId, updates){
 
   const data = {generatedAt: now(), items: processed, matchedCount: removed, milkKept};
   cache.instashopReports[branchId] = data;
-  pendingReportWrites.instashopReports[branchId] = data;
+  lockReport('instashopReports', branchId, data);
   if(updates){ updates['app_data/instashopReports/'+branchId] = data; }
   else { firebaseWrite('app_data/instashopReports/'+branchId, data); }
   return {removed, milkKept, count: processed.length};
@@ -938,7 +998,7 @@ function generateReports(branchId){
   const res = generateReportsCore(branchId, updates);
   if(!res){ toast('ارفع الليستة اليومية أولاً'); return; }
   generateInstashopReportCore(branchId, updates);
-  firebaseBatchWrite(updates);
+  firebaseBatchWrite(updates).catch(err=>console.error('Report batch write error:', err));
   renderBranches(branchId);
   toast('تم إنشاء الريبورتات — تم حذف '+res.removed+' صنف من ليستة النواقص بالكامل');
 }
@@ -953,7 +1013,7 @@ function generateAllReports(){
     if(res){ done++; generateInstashopReportCore(b.id, updates); }
     else skipped++;
   });
-  firebaseBatchWrite(updates);
+  firebaseBatchWrite(updates).catch(err=>console.error('Reports batch write error:', err));
   renderBranches();
   toast(`تم إنشاء/تحديث الريبورتات لـ ${done} فرع` + (skipped ? ' — تم تخطي '+skipped+' فرع بدون ليستة يومية' : ''));
 }
