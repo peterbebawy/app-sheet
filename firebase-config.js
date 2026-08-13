@@ -1,5 +1,7 @@
+/* Firebase Configuration */
+
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
+  apiKey: "AIzaSyDO2or6mbwfE_YW-V-u4JAEuHIOLgDzaNw",
   authDomain: "app-sheet-18928.firebaseapp.com",
   databaseURL: "https://app-sheet-18928-default-rtdb.firebaseio.com",
   projectId: "app-sheet-18928",
