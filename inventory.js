@@ -34,6 +34,33 @@ function normalizeCache(v){
 let firstDataReceived = false;
 let firstLoadTimeoutTimer = null;
 
+/* يمنع Snapshot قديم من Firebase من استبدال الريبورت الجديد لحظيًا.
+   بعد إنشاء ريبورت جديد، نحتفظ بالنسخة الجديدة محليًا حتى يصل Snapshot
+   بنفس generatedAt أو أحدث. */
+const pendingReportWrites = {
+  reports: {},
+  instashopReports: {}
+};
+
+function keepNewestReportsFromSnapshot(nextCache){
+  ['reports','instashopReports'].forEach(type=>{
+    const pending = pendingReportWrites[type] || {};
+    Object.keys(pending).forEach(id=>{
+      const local = pending[id];
+      const incoming = nextCache[type] && nextCache[type][id];
+      const localTime = Number(local && local.generatedAt) || 0;
+      const incomingTime = Number(incoming && incoming.generatedAt) || 0;
+
+      if(!incoming || incomingTime < localTime){
+        nextCache[type][id] = local;
+      }else{
+        delete pending[id];
+      }
+    });
+  });
+  return nextCache;
+}
+
 function attachDataListener(){
   if(dataListenerAttached) return;
   dataListenerAttached = true;
@@ -59,6 +86,7 @@ function attachDataListener(){
     firstDataReceived = true;
     clearTimeout(firstLoadTimeoutTimer);
     cache = normalizeCache(snapshot.val());
+    cache = keepNewestReportsFromSnapshot(cache);
     if(!cache.settings || !cache.settings.deleteBranchPassword){
       // أول مرة: نزرع كلمة السر الافتراضية فى فايربيز عشان تتخزن هناك بدل ما تكون مكتوبة فى كود الصفحة
       firebaseWrite('app_data/settings/deleteBranchPassword', DELETE_BRANCH_PASSWORD_DEFAULT);
@@ -859,6 +887,7 @@ function generateReportsCore(branchId, updates){
 
   const data = {generatedAt: now(), items: processed, matchedCount: removed};
   cache.reports[branchId] = data;
+  pendingReportWrites.reports[branchId] = data;
   if(updates){ updates['app_data/reports/'+branchId] = data; }
   else { firebaseWrite('app_data/reports/'+branchId, data); }
   return {removed, count: processed.length};
@@ -898,6 +927,7 @@ function generateInstashopReportCore(branchId, updates){
 
   const data = {generatedAt: now(), items: processed, matchedCount: removed, milkKept};
   cache.instashopReports[branchId] = data;
+  pendingReportWrites.instashopReports[branchId] = data;
   if(updates){ updates['app_data/instashopReports/'+branchId] = data; }
   else { firebaseWrite('app_data/instashopReports/'+branchId, data); }
   return {removed, milkKept, count: processed.length};
@@ -1283,8 +1313,8 @@ function renderBranchCard(b, isOpen){
 
   const mainBadge = main ? `<span class="badge badge-ok">آخر تحديث: ${fmtDate(main.uploadedAt)}</span>` : `<span class="badge badge-off">لم يتم الرفع</span>`;
   const shortBadge = shortage.items.length ? `<span class="badge badge-ok">${shortage.items.length} صنف ناقص</span>` : `<span class="badge badge-off">لا توجد نواقص</span>`;
-  const repBadge = reports ? `<span class="badge badge-warn">تُحذف ${fmtDate(reports.generatedAt + 1000*60*60*24*2)}</span>` : `<span class="badge badge-off">لا يوجد ريبورت</span>`;
-  const instashopBadge = instashop ? `<span class="badge badge-warn">تُحذف ${fmtDate(instashop.generatedAt + 1000*60*60*24*2)}</span>` : `<span class="badge badge-off">لا يوجد ريبورت</span>`;
+  const repBadge = reports ? `<span class="badge badge-warn">تُحذف ${fmtDate(reports.generatedAt + TWO_HOURS)}</span>` : `<span class="badge badge-off">لا يوجد ريبورت</span>`;
+  const instashopBadge = instashop ? `<span class="badge badge-warn">تُحذف ${fmtDate(instashop.generatedAt + TWO_HOURS)}</span>` : `<span class="badge badge-off">لا يوجد ريبورت</span>`;
 
   /* محتوى تفاصيل الفرع (الجداول التقيلة) بيتبني بس لو الكارت مفتوح فعلاً — الفروع المقفولة
      بتاخد div فاضي، وبيتبني محتواها أول ما المستخدم يفتحها (lazy render) — ده بيقلل شغل
@@ -1422,7 +1452,7 @@ function renderBranchBody(b){
               </table>
             </div>
             <div class="hint" id="rep-count-branch-${b.id}" style="padding:6px 2px 0">${reports.items.length} صنف (Vezeeta)</div>
-            <div class="expiry-note">سيُحذف هذا الريبورت تلقائيًا في ${fmtDate(reports.generatedAt + 1000*60*60*24*2)}</div>
+            <div class="expiry-note">سيُحذف هذا الريبورت تلقائيًا في ${fmtDate(reports.generatedAt + TWO_HOURS)}</div>
           ` : `<div class="status">لا يوجد ريبورت بعد</div>`}
         </div>
 
