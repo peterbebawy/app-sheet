@@ -10,7 +10,7 @@ const LS = {
 };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 const now = () => Date.now();
-const TWO_DAYS = 1000*60*60*24*2;
+const TWO_HOURS = 1000*60*60*2;
 
 /* نسخة محلية (كاش) من بيانات فايربيز، تتحدث تلقائيًا لحظة أي تغيير عن طريق on('value') */
 let cache = { branches: [], main: {}, shortage: {}, reports: {}, instashopReports: {}, settings: {}, catalogs: {}, appAvailable: {}, unavailableReports: {} };
@@ -181,11 +181,11 @@ function fmtDate(ts){ if(!ts) return '—'; const d = new Date(ts); return d.toL
 function expireOldReports(){
   getBranches().forEach(b=>{
     const r = getReports(b.id);
-    if(r && r.generatedAt && (now() - r.generatedAt > TWO_DAYS)){
+    if(r && r.generatedAt && (now() - r.generatedAt > TWO_HOURS)){
       clearReports(b.id);
     }
     const ir = getInstashopReport(b.id);
-    if(ir && ir.generatedAt && (now() - ir.generatedAt > TWO_DAYS)){
+    if(ir && ir.generatedAt && (now() - ir.generatedAt > TWO_HOURS)){
       clearInstashopReport(b.id);
     }
   });
