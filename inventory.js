@@ -34,73 +34,43 @@ function normalizeCache(v){
 let firstDataReceived = false;
 let firstLoadTimeoutTimer = null;
 
-/* ===== تثبيت الريبورت فور إنشائه =====
-   نفس فكرة تثبيت الليستة اليومية:
-   الواجهة تعتمد فورًا على آخر ريبورت أنشأه المستخدم، وأي Snapshot قديم
-   يصل من Firebase لا يُسمح له باستبداله. يظل القفل حتى يصل من Firebase
-   نفس الريبورت أو ريبورت أحدث. */
-const REPORT_LOCAL_KEY = 'ibs_latest_reports_v1';
-const reportPending = {
-  reports: {},
-  instashopReports: {}
-};
+/* ===== تثبيت الريبورت الجديد فورًا =====
+   الريبورت الذي تم إنشاؤه محليًا له أولوية على أي Snapshot أقدم
+   يصل من Firebase. وإذا وصل Snapshot أقدم، نعيد تثبيت النسخة الأحدث
+   في Firebase بدل السماح لها بالرجوع للقديم. */
+function mergeReportResults(incoming){
+  const next = normalizeCache(incoming);
+  const reportTypes = [
+    ['reports', 'app_data/reports/'],
+    ['instashopReports', 'app_data/instashopReports/']
+  ];
 
-function loadReportPending(){
-  try{
-    const saved = JSON.parse(localStorage.getItem(REPORT_LOCAL_KEY) || '{}');
-    reportPending.reports = saved.reports || {};
-    reportPending.instashopReports = saved.instashopReports || {};
-  }catch(e){
-    reportPending.reports = {};
-    reportPending.instashopReports = {};
-  }
-}
+  reportTypes.forEach(([type, path])=>{
+    const current = cache[type] || {};
+    const remote = next[type] || {};
+    const merged = {...remote};
 
-function saveReportPending(){
-  try{
-    localStorage.setItem(REPORT_LOCAL_KEY, JSON.stringify(reportPending));
-  }catch(e){}
-}
-
-loadReportPending();
-
-function mergeNewestReportsFromFirebase(next){
-  ['reports','instashopReports'].forEach(type=>{
-    const pending = reportPending[type] || {};
-    Object.keys(pending).forEach(id=>{
-      const localReport = pending[id];
-      const remoteReport = next[type] && next[type][id];
+    Object.keys(current).forEach(id=>{
+      const localReport = current[id];
+      const remoteReport = remote[id];
       const localTs = Number(localReport && localReport.generatedAt) || 0;
       const remoteTs = Number(remoteReport && remoteReport.generatedAt) || 0;
 
-      if(remoteTs >= localTs && remoteTs > 0){
-        /* Firebase أصبح متزامنًا: نرفع القفل */
-        delete pending[id];
-      }else{
-        /* Snapshot أقدم أو غير موجود: حافظ على الريبورت الجديد فورًا */
-        next[type] = next[type] || {};
-        next[type][id] = localReport;
+      if(localTs > remoteTs){
+        /* لا تسمح للقديم بإرجاع الشاشة */
+        merged[id] = localReport;
+
+        /* والأهم: ثبّت الجديد مرة أخرى في Firebase */
+        firebase.database().ref(path + id).set(localReport).catch(err=>{
+          console.error('Re-save latest report failed:', path + id, err);
+        });
       }
     });
+
+    next[type] = merged;
   });
-  saveReportPending();
+
   return next;
-}
-
-function lockReport(type, id, data){
-  reportPending[type][id] = data;
-  saveReportPending();
-}
-
-function unlockReportIfConfirmed(type, id, remote){
-  const local = reportPending[type] && reportPending[type][id];
-  if(!local) return;
-  const localTs = Number(local.generatedAt) || 0;
-  const remoteTs = Number(remote && remote.generatedAt) || 0;
-  if(remoteTs >= localTs && remoteTs > 0){
-    delete reportPending[type][id];
-    saveReportPending();
-  }
 }
 
 function attachDataListener(){
@@ -127,8 +97,7 @@ function attachDataListener(){
   firebase.database().ref('app_data').on('value', snapshot=>{
     firstDataReceived = true;
     clearTimeout(firstLoadTimeoutTimer);
-    cache = normalizeCache(snapshot.val());
-    cache = mergeNewestReportsFromFirebase(cache);
+    cache = mergeReportResults(snapshot.val());
     if(!cache.settings || !cache.settings.deleteBranchPassword){
       // أول مرة: نزرع كلمة السر الافتراضية فى فايربيز عشان تتخزن هناك بدل ما تكون مكتوبة فى كود الصفحة
       firebaseWrite('app_data/settings/deleteBranchPassword', DELETE_BRANCH_PASSWORD_DEFAULT);
@@ -229,31 +198,13 @@ function clearAllMain(){
 function getShortage(id){ return (cache.shortage && cache.shortage[id]) || {updatedAt:null, items:[]}; }
 function saveShortage(id, d){ cache.shortage[id] = d; firebaseWrite('app_data/shortage/'+id, d); }
 function getReports(id){ return (cache.reports && cache.reports[id]) || null; }
-function saveReports(id, d){
-  cache.reports[id] = d;
-  lockReport('reports', id, d);
-  firebaseWrite('app_data/reports/'+id, d);
-}
-function clearReports(id){
-  delete cache.reports[id];
-  if(reportPending.reports[id]) delete reportPending.reports[id];
-  saveReportPending();
-  firebaseRemove('app_data/reports/'+id);
-}
+function saveReports(id, d){ cache.reports[id] = d; firebaseWrite('app_data/reports/'+id, d); }
+function clearReports(id){ delete cache.reports[id]; firebaseRemove('app_data/reports/'+id); }
 
 /* ريبورت Instashop منفصل (نفس تفاصيل Vezeeta، لكن مع استثناء أصناف الألبان من الحذف بسبب النواقص) */
 function getInstashopReport(id){ return (cache.instashopReports && cache.instashopReports[id]) || null; }
-function saveInstashopReport(id, d){
-  cache.instashopReports[id] = d;
-  lockReport('instashopReports', id, d);
-  firebaseWrite('app_data/instashopReports/'+id, d);
-}
-function clearInstashopReport(id){
-  delete cache.instashopReports[id];
-  if(reportPending.instashopReports[id]) delete reportPending.instashopReports[id];
-  saveReportPending();
-  firebaseRemove('app_data/instashopReports/'+id);
-}
+function saveInstashopReport(id, d){ cache.instashopReports[id] = d; firebaseWrite('app_data/instashopReports/'+id, d); }
+function clearInstashopReport(id){ delete cache.instashopReports[id]; firebaseRemove('app_data/instashopReports/'+id); }
 
 function norm(v){ return (v===undefined||v===null) ? '' : String(v).trim(); }
 function toNum(v){ const n = parseFloat(v); return isNaN(n) ? 0 : n; }
@@ -870,7 +821,7 @@ function previewShortageCode(branchId, idx, value){
     const c = norm(value);
     const found = main && main.items.find(m => m.code === c);
     row.dataset.code = c.toLowerCase();
-    row.dataset.name = norm(found ? (found.name||'') : '').toLowerCase();
+    row.dataset.name = (found ? (found.name||'') : '').toLowerCase();
   }
 }
 
@@ -900,56 +851,12 @@ function searchMainCode(branchId, value){
 /* بحث بالكود أو الاسم داخل جدول ليستة النواقص (فلترة الصفوف المعروضة) */
 function filterShortageTable(branchId, value){
   const q = norm(value).toLowerCase();
-  const table = document.getElementById('short-table-'+branchId);
-  if(!table) return;
-
-  const rows = table.querySelectorAll('tbody tr');
-  let visible = 0;
-
-  // نبني خريطة الكود -> الاسم من الليستة اليومية، حتى البحث بالاسم
-  // يشتغل حتى لو الصف نفسه لم يكن يحمل الاسم وقت رسم الجدول.
-  const main = getMain(branchId);
-  const mainByCode = new Map(
-    (main && Array.isArray(main.items) ? main.items : [])
-      .map(it => [norm(it.code).toLowerCase(), norm(it.name).toLowerCase()])
-  );
-
-  rows.forEach(tr => {
-    const code = norm(tr.dataset.code || '').toLowerCase();
-
-    // الكود المخزن في الصف.
-    // ولو الاسم غير موجود، نحاول الحصول عليه مباشرة من الليستة اليومية.
-    let name = norm(tr.dataset.name || '').toLowerCase();
-    if(!name && code) name = mainByCode.get(code) || '';
-
-    // كحل إضافي، نقرأ قيمة input داخل الصف نفسه.
-    if(!name){
-      const input = tr.querySelector('input.cell-input');
-      if(input){
-        const inputCode = norm(input.value).toLowerCase();
-        if(inputCode && mainByCode.has(inputCode)){
-          name = mainByCode.get(inputCode);
-        }
-      }
-    }
-
-    const match = !q || code.includes(q) || name.includes(q);
-    tr.style.display = match ? '' : 'none';
-    if(match) visible++;
+  document.querySelectorAll('#short-table-'+branchId+' tbody tr').forEach(tr=>{
+    if(!q){ tr.style.display=''; return; }
+    const code = (tr.dataset.code||'');
+    const name = (tr.dataset.name||'');
+    tr.style.display = (code.includes(q) || name.includes(q)) ? '' : 'none';
   });
-
-  // إظهار/إخفاء رسالة بسيطة عند عدم وجود نتائج.
-  let empty = table.parentElement.querySelector('.shortage-search-empty');
-  if(q && visible === 0){
-    if(!empty){
-      empty = document.createElement('div');
-      empty.className = 'shortage-search-empty mini-preview warn';
-      empty.textContent = '⚠ لا يوجد صنف مطابق للبحث';
-      table.parentElement.appendChild(empty);
-    }
-  }else if(empty){
-    empty.remove();
-  }
 }
 
 
@@ -991,7 +898,6 @@ function generateReportsCore(branchId, updates){
 
   const data = {generatedAt: now(), items: processed, matchedCount: removed};
   cache.reports[branchId] = data;
-  lockReport('reports', branchId, data);
   if(updates){ updates['app_data/reports/'+branchId] = data; }
   else { firebaseWrite('app_data/reports/'+branchId, data); }
   return {removed, count: processed.length};
@@ -1031,35 +937,63 @@ function generateInstashopReportCore(branchId, updates){
 
   const data = {generatedAt: now(), items: processed, matchedCount: removed, milkKept};
   cache.instashopReports[branchId] = data;
-  lockReport('instashopReports', branchId, data);
   if(updates){ updates['app_data/instashopReports/'+branchId] = data; }
   else { firebaseWrite('app_data/instashopReports/'+branchId, data); }
   return {removed, milkKept, count: processed.length};
 }
 
-function generateReports(branchId){
+async function generateReports(branchId){
   const updates = {};
   const res = generateReportsCore(branchId, updates);
   if(!res){ toast('ارفع الليستة اليومية أولاً'); return; }
-  generateInstashopReportCore(branchId, updates);
-  firebaseBatchWrite(updates).catch(err=>console.error('Report batch write error:', err));
+
+  /* الجديد أصبح في cache فورًا مثل الليستة اليومية */
   renderBranches(branchId);
-  toast('تم إنشاء الريبورتات — تم حذف '+res.removed+' صنف من ليستة النواقص بالكامل');
+
+  try{
+    const saveResult = firebaseBatchWrite(updates);
+    if(saveResult && typeof saveResult.then === 'function'){
+      await saveResult;
+    }
+    renderBranches(branchId);
+    toast('تم إنشاء الريبورتات وتثبيت النتيجة الجديدة فورًا');
+  }catch(err){
+    console.error('Report save error:', err);
+    renderBranches(branchId);
+    toast('تم إنشاء النتيجة، لكن تعذر تأكيد الحفظ في Firebase');
+  }
 }
 
 /* إنشاء/تحديث الريبورتات لكل الفروع دفعة واحدة */
-function generateAllReports(){
+async function generateAllReports(){
   const branches = getBranches();
   const updates = {};
   let done = 0, skipped = 0;
+
   branches.forEach(b=>{
     const res = generateReportsCore(b.id, updates);
-    if(res){ done++; generateInstashopReportCore(b.id, updates); }
-    else skipped++;
+    if(res){
+      done++;
+      generateInstashopReportCore(b.id, updates);
+    }else skipped++;
   });
-  firebaseBatchWrite(updates).catch(err=>console.error('Reports batch write error:', err));
+
+  /* الجديد ظاهر فورًا، ثم يتم تثبيته دفعة واحدة */
   renderBranches();
-  toast(`تم إنشاء/تحديث الريبورتات لـ ${done} فرع` + (skipped ? ' — تم تخطي '+skipped+' فرع بدون ليستة يومية' : ''));
+
+  try{
+    const saveResult = firebaseBatchWrite(updates);
+    if(saveResult && typeof saveResult.then === 'function'){
+      await saveResult;
+    }
+    renderBranches();
+    toast(`تم إنشاء وتثبيت الريبورتات الجديدة لـ ${done} فرع` +
+      (skipped ? ' — تم تخطي '+skipped+' فرع بدون ليستة يومية' : ''));
+  }catch(err){
+    console.error('Reports batch save error:', err);
+    renderBranches();
+    toast('تم إنشاء النتائج، لكن تعذر تأكيد الحفظ في Firebase');
+  }
 }
 
 /* ===================== EXPORT XLSX ===================== */
@@ -1417,8 +1351,8 @@ function renderBranchCard(b, isOpen){
 
   const mainBadge = main ? `<span class="badge badge-ok">آخر تحديث: ${fmtDate(main.uploadedAt)}</span>` : `<span class="badge badge-off">لم يتم الرفع</span>`;
   const shortBadge = shortage.items.length ? `<span class="badge badge-ok">${shortage.items.length} صنف ناقص</span>` : `<span class="badge badge-off">لا توجد نواقص</span>`;
-  const repBadge = reports ? `<span class="badge badge-warn">تُحذف ${fmtDate(reports.generatedAt + TWO_HOURS)}</span>` : `<span class="badge badge-off">لا يوجد ريبورت</span>`;
-  const instashopBadge = instashop ? `<span class="badge badge-warn">تُحذف ${fmtDate(instashop.generatedAt + TWO_HOURS)}</span>` : `<span class="badge badge-off">لا يوجد ريبورت</span>`;
+  const repBadge = reports ? `<span class="badge badge-warn">تُحذف ${fmtDate(reports.generatedAt + 1000*60*60*24*2)}</span>` : `<span class="badge badge-off">لا يوجد ريبورت</span>`;
+  const instashopBadge = instashop ? `<span class="badge badge-warn">تُحذف ${fmtDate(instashop.generatedAt + 1000*60*60*24*2)}</span>` : `<span class="badge badge-off">لا يوجد ريبورت</span>`;
 
   /* محتوى تفاصيل الفرع (الجداول التقيلة) بيتبني بس لو الكارت مفتوح فعلاً — الفروع المقفولة
      بتاخد div فاضي، وبيتبني محتواها أول ما المستخدم يفتحها (lazy render) — ده بيقلل شغل
@@ -1556,7 +1490,7 @@ function renderBranchBody(b){
               </table>
             </div>
             <div class="hint" id="rep-count-branch-${b.id}" style="padding:6px 2px 0">${reports.items.length} صنف (Vezeeta)</div>
-            <div class="expiry-note">سيُحذف هذا الريبورت تلقائيًا في ${fmtDate(reports.generatedAt + TWO_HOURS)}</div>
+            <div class="expiry-note">سيُحذف هذا الريبورت تلقائيًا في ${fmtDate(reports.generatedAt + 1000*60*60*24*2)}</div>
           ` : `<div class="status">لا يوجد ريبورت بعد</div>`}
         </div>
 
