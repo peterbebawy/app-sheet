@@ -418,17 +418,6 @@ function attachDataListener(){
   if(dataListenerAttached) return;
   dataListenerAttached = true;
 
-  /* تحميل قائمة الفروع وحدها أولًا.
-     app_data يحتوي على ملفات/تقارير كبيرة، لذلك انتظار snapshot الكامل كان يؤخر ظهور الفروع.
-     بهذا تظهر الفروع فور وصول مسار branches، بينما باقي البيانات تكمل التحميل في الخلفية. */
-  firebase.database().ref('app_data/branches').on('value', branchSnap=>{
-    const branches = branchSnap.val();
-    cache.branches = Array.isArray(branches) ? branches : [];
-    renderBranches();
-  }, err=>{
-    console.error('Firebase branches sync error:', err);
-  });
-
   /* لو أول تحميل للبيانات ماخدش وقت طويل من غير ما يوصل، بنوضح للمستخدم إن فيه مشكلة اتصال
      بدل ما يفضل شايف شاشة فاضية أو "جارٍ التحميل" لحد ما هو يفصل */
   firstLoadTimeoutTimer = setTimeout(()=>{
@@ -489,7 +478,6 @@ function watchConnectionState(){
 function detachDataListener(){
   if(!dataListenerAttached) return;
   dataListenerAttached = false;
-  firebase.database().ref('app_data/branches').off();
   cache = { branches: [], main: {}, shortage: {}, reports: {}, instashopReports: {}, settings: {}, catalogs: {}, appAvailable: {}, unavailableReports: {} };
   cache = { branches: [], main: {}, shortage: {}, reports: {}, instashopReports: {}, settings: {}, catalogs: {}, unavailableReports: {} };
   clearTimeout(firstLoadTimeoutTimer);
@@ -776,13 +764,22 @@ function confirmChangePassword(){
 }
 
 /* ===================== TOGGLE BRANCH BODY ===================== */
+/* الفروع المفتوحة لا تتأثر بتحديثات Firebase اللحظية */
+const openBranchIds = new Set();
 function toggleBranch(id){
   const el = document.getElementById('body-'+id);
   if(!el) return;
+
   const opening = !el.classList.contains('open');
-  if(opening) openBranchIds.add(id);
-  else openBranchIds.delete(id);
+
+  if(opening){
+    openBranchIds.add(id);
+  }else{
+    openBranchIds.delete(id);
+  }
+
   el.classList.toggle('open', opening);
+
   if(opening && el.dataset.rendered !== '1'){
     const b = getBranches().find(x=>x.id===id);
     if(b){
@@ -1765,21 +1762,30 @@ async function exportAllTalabatToFolder(){
 }
 
 /* ===================== RENDER BRANCHES ===================== */
-const openBranchIds = new Set();
-
 function renderBranches(keepOpenId){
   const list = document.getElementById('branches-list');
   const branches = getBranches();
   if(!list) return;
+
+  if(keepOpenId){
+    openBranchIds.add(keepOpenId);
+  }
+
   if(!branches.length){
     openBranchIds.clear();
     list.innerHTML = '<div class="empty"><b>لا يوجد فروع بعد</b>ابدأ بإضافة فرع من الزر أعلى الصفحة</div>';
     return;
   }
-  if(keepOpenId) openBranchIds.add(keepOpenId);
-  const validIds = new Set(branches.map(b=>b.id));
-  Array.from(openBranchIds).forEach(id=>{ if(!validIds.has(id)) openBranchIds.delete(id); });
-  list.innerHTML = branches.map(b => renderBranchCard(b, openBranchIds.has(b.id))).join('');
+
+  // حذف IDs التي لم تعد موجودة.
+  const validIds = new Set(branches.map(b => b.id));
+  Array.from(openBranchIds).forEach(id => {
+    if(!validIds.has(id)) openBranchIds.delete(id);
+  });
+
+  list.innerHTML = branches.map(b =>
+    renderBranchCard(b, openBranchIds.has(b.id))
+  ).join('');
 }
 
 function renderBranchCard(b, isOpen){
