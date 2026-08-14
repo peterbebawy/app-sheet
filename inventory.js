@@ -335,7 +335,6 @@ function confirmAddBranch(){
    (مش مكتوبة نهائيًا فى كود الصفحة) — القيمة الافتراضية أول مرة فقط، وبعدها بتتقرأ من فايربيز */
 const DELETE_BRANCH_PASSWORD_DEFAULT = '526933';
 function deleteBranch(id){
-  openBranchIds.delete(id);
   const b = getBranches().find(x=>x.id===id);
   if(!confirm('حذف فرع "'+(b?b.name:'')+'" نهائيًا مع كل بياناته (الليستة اليومية، النواقص، الريبورتات)؟')) return;
   const pass = prompt('أدخل كلمة السر لتأكيد حذف الفرع:');
@@ -399,17 +398,8 @@ function confirmChangePassword(){
 function toggleBranch(id){
   const el = document.getElementById('body-'+id);
   if(!el) return;
-
   const opening = !el.classList.contains('open');
-
-  if(opening){
-    openBranchIds.add(id);
-  }else{
-    openBranchIds.delete(id);
-  }
-
-  el.classList.toggle('open', opening);
-
+  el.classList.toggle('open');
   if(opening && el.dataset.rendered !== '1'){
     const b = getBranches().find(x=>x.id===id);
     if(b){
@@ -880,7 +870,7 @@ function previewShortageCode(branchId, idx, value){
     const c = norm(value);
     const found = main && main.items.find(m => m.code === c);
     row.dataset.code = c.toLowerCase();
-    row.dataset.name = (found ? (found.name||'') : '').toLowerCase();
+    row.dataset.name = norm(found ? (found.name||'') : '').toLowerCase();
   }
 }
 
@@ -910,12 +900,56 @@ function searchMainCode(branchId, value){
 /* بحث بالكود أو الاسم داخل جدول ليستة النواقص (فلترة الصفوف المعروضة) */
 function filterShortageTable(branchId, value){
   const q = norm(value).toLowerCase();
-  document.querySelectorAll('#short-table-'+branchId+' tbody tr').forEach(tr=>{
-    if(!q){ tr.style.display=''; return; }
-    const code = (tr.dataset.code||'');
-    const name = (tr.dataset.name||'');
-    tr.style.display = (code.includes(q) || name.includes(q)) ? '' : 'none';
+  const table = document.getElementById('short-table-'+branchId);
+  if(!table) return;
+
+  const rows = table.querySelectorAll('tbody tr');
+  let visible = 0;
+
+  // نبني خريطة الكود -> الاسم من الليستة اليومية، حتى البحث بالاسم
+  // يشتغل حتى لو الصف نفسه لم يكن يحمل الاسم وقت رسم الجدول.
+  const main = getMain(branchId);
+  const mainByCode = new Map(
+    (main && Array.isArray(main.items) ? main.items : [])
+      .map(it => [norm(it.code).toLowerCase(), norm(it.name).toLowerCase()])
+  );
+
+  rows.forEach(tr => {
+    const code = norm(tr.dataset.code || '').toLowerCase();
+
+    // الكود المخزن في الصف.
+    // ولو الاسم غير موجود، نحاول الحصول عليه مباشرة من الليستة اليومية.
+    let name = norm(tr.dataset.name || '').toLowerCase();
+    if(!name && code) name = mainByCode.get(code) || '';
+
+    // كحل إضافي، نقرأ قيمة input داخل الصف نفسه.
+    if(!name){
+      const input = tr.querySelector('input.cell-input');
+      if(input){
+        const inputCode = norm(input.value).toLowerCase();
+        if(inputCode && mainByCode.has(inputCode)){
+          name = mainByCode.get(inputCode);
+        }
+      }
+    }
+
+    const match = !q || code.includes(q) || name.includes(q);
+    tr.style.display = match ? '' : 'none';
+    if(match) visible++;
   });
+
+  // إظهار/إخفاء رسالة بسيطة عند عدم وجود نتائج.
+  let empty = table.parentElement.querySelector('.shortage-search-empty');
+  if(q && visible === 0){
+    if(!empty){
+      empty = document.createElement('div');
+      empty.className = 'shortage-search-empty mini-preview warn';
+      empty.textContent = '⚠ لا يوجد صنف مطابق للبحث';
+      table.parentElement.appendChild(empty);
+    }
+  }else if(empty){
+    empty.remove();
+  }
 }
 
 
@@ -1365,30 +1399,14 @@ async function exportAllTalabatToFolder(){
 }
 
 /* ===================== RENDER BRANCHES ===================== */
-/* الحفاظ على الفروع المفتوحة عند وصول تحديثات Firebase */
-const openBranchIds = new Set();
-
 function renderBranches(keepOpenId){
   const list = document.getElementById('branches-list');
   const branches = getBranches();
-  if(!list) return;
-
   if(!branches.length){
-    openBranchIds.clear();
     list.innerHTML = '<div class="empty"><b>لا يوجد فروع بعد</b>ابدأ بإضافة فرع من الزر أعلى الصفحة</div>';
     return;
   }
-
-  if(keepOpenId){
-    openBranchIds.add(keepOpenId);
-  }
-
-  const validIds = new Set(branches.map(b => b.id));
-  Array.from(openBranchIds).forEach(id => {
-    if(!validIds.has(id)) openBranchIds.delete(id);
-  });
-
-  list.innerHTML = branches.map(b => renderBranchCard(b, openBranchIds.has(b.id))).join('');
+  list.innerHTML = branches.map(b => renderBranchCard(b, b.id === keepOpenId)).join('');
 }
 
 function renderBranchCard(b, isOpen){
