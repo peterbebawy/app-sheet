@@ -703,7 +703,6 @@ function confirmAddBranch(){
    (مش مكتوبة نهائيًا فى كود الصفحة) — القيمة الافتراضية أول مرة فقط، وبعدها بتتقرأ من فايربيز */
 const DELETE_BRANCH_PASSWORD_DEFAULT = '526933';
 function deleteBranch(id){
-  openBranchIds.delete(id);
   const b = getBranches().find(x=>x.id===id);
   if(!confirm('حذف فرع "'+(b?b.name:'')+'" نهائيًا مع كل بياناته (الليستة اليومية، النواقص، الريبورتات)؟')) return;
   const pass = prompt('أدخل كلمة السر لتأكيد حذف الفرع:');
@@ -764,22 +763,11 @@ function confirmChangePassword(){
 }
 
 /* ===================== TOGGLE BRANCH BODY ===================== */
-/* الفروع المفتوحة لا تتأثر بتحديثات Firebase اللحظية */
-const openBranchIds = new Set();
 function toggleBranch(id){
   const el = document.getElementById('body-'+id);
   if(!el) return;
-
   const opening = !el.classList.contains('open');
-
-  if(opening){
-    openBranchIds.add(id);
-  }else{
-    openBranchIds.delete(id);
-  }
-
-  el.classList.toggle('open', opening);
-
+  el.classList.toggle('open');
   if(opening && el.dataset.rendered !== '1'){
     const b = getBranches().find(x=>x.id===id);
     if(b){
@@ -1765,27 +1753,11 @@ async function exportAllTalabatToFolder(){
 function renderBranches(keepOpenId){
   const list = document.getElementById('branches-list');
   const branches = getBranches();
-  if(!list) return;
-
-  if(keepOpenId){
-    openBranchIds.add(keepOpenId);
-  }
-
   if(!branches.length){
-    openBranchIds.clear();
     list.innerHTML = '<div class="empty"><b>لا يوجد فروع بعد</b>ابدأ بإضافة فرع من الزر أعلى الصفحة</div>';
     return;
   }
-
-  // حذف IDs التي لم تعد موجودة.
-  const validIds = new Set(branches.map(b => b.id));
-  Array.from(openBranchIds).forEach(id => {
-    if(!validIds.has(id)) openBranchIds.delete(id);
-  });
-
-  list.innerHTML = branches.map(b =>
-    renderBranchCard(b, openBranchIds.has(b.id))
-  ).join('');
+  list.innerHTML = branches.map(b => renderBranchCard(b, b.id === keepOpenId)).join('');
 }
 
 function renderBranchCard(b, isOpen){
