@@ -335,6 +335,7 @@ function confirmAddBranch(){
    (مش مكتوبة نهائيًا فى كود الصفحة) — القيمة الافتراضية أول مرة فقط، وبعدها بتتقرأ من فايربيز */
 const DELETE_BRANCH_PASSWORD_DEFAULT = '526933';
 function deleteBranch(id){
+  openBranchIds.delete(id);
   const b = getBranches().find(x=>x.id===id);
   if(!confirm('حذف فرع "'+(b?b.name:'')+'" نهائيًا مع كل بياناته (الليستة اليومية، النواقص، الريبورتات)؟')) return;
   const pass = prompt('أدخل كلمة السر لتأكيد حذف الفرع:');
@@ -398,8 +399,17 @@ function confirmChangePassword(){
 function toggleBranch(id){
   const el = document.getElementById('body-'+id);
   if(!el) return;
+
   const opening = !el.classList.contains('open');
-  el.classList.toggle('open');
+
+  if(opening){
+    openBranchIds.add(id);
+  }else{
+    openBranchIds.delete(id);
+  }
+
+  el.classList.toggle('open', opening);
+
   if(opening && el.dataset.rendered !== '1'){
     const b = getBranches().find(x=>x.id===id);
     if(b){
@@ -1355,14 +1365,30 @@ async function exportAllTalabatToFolder(){
 }
 
 /* ===================== RENDER BRANCHES ===================== */
+/* الحفاظ على الفروع المفتوحة عند وصول تحديثات Firebase */
+const openBranchIds = new Set();
+
 function renderBranches(keepOpenId){
   const list = document.getElementById('branches-list');
   const branches = getBranches();
+  if(!list) return;
+
   if(!branches.length){
+    openBranchIds.clear();
     list.innerHTML = '<div class="empty"><b>لا يوجد فروع بعد</b>ابدأ بإضافة فرع من الزر أعلى الصفحة</div>';
     return;
   }
-  list.innerHTML = branches.map(b => renderBranchCard(b, b.id === keepOpenId)).join('');
+
+  if(keepOpenId){
+    openBranchIds.add(keepOpenId);
+  }
+
+  const validIds = new Set(branches.map(b => b.id));
+  Array.from(openBranchIds).forEach(id => {
+    if(!validIds.has(id)) openBranchIds.delete(id);
+  });
+
+  list.innerHTML = branches.map(b => renderBranchCard(b, openBranchIds.has(b.id))).join('');
 }
 
 function renderBranchCard(b, isOpen){
